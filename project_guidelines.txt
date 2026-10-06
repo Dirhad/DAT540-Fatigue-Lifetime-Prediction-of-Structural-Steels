@@ -1,0 +1,13 @@
+1. Shapes of dataset; data types; feature overview; missing values, duplicates; etc
+2. Handled nulls; removed duplicates; addressed inconsitencies; etc
+3. At least 3 meaningful plots; insights clearly interpreted
+4. Type conversions; normalization or scaling; outlier handling when needed
+5. Identified key features; justification provided
+6. Explained suitability; aligned models with problem
+7. At least 3 models tested
+8. Clearly defined problem or hypothesis
+9. Split data correctly; normalization applied if needed; nulls Handled
+10. Reported accuracy/error/metrics interpreted
+11. Metrics used for classification/regression/clustrering (example: accuracy, regression error, Silhouette Coefficient)
+12. Evidence of tuning or optimization if needed
+13. Tested on unseen data; showed sample outputs.

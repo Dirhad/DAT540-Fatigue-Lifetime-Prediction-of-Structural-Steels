@@ -1,1 +1,1 @@
-# DAt540- Fatigue Lifetime Prediction of Structural Steels
+# DAt540 - Fatigue Lifetime Prediction of Structural Steels
