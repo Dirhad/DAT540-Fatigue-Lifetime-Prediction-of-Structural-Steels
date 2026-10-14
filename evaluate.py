@@ -13,11 +13,15 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.linear_model import LinearRegression, Ridge
-from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import GroupKFold, GridSearchCV, PredefinedSplit
 from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+
+pd.set_option("display.width", 200) # Show all columns when printing tables
+pd.set_option("display.max_colwidth", None)
+pd.set_option("display.max_columns", None)
 
 # Columns that are never used as inputs
 DROP_FROM_X = ["log10_Nf", "group", "fold", "runout"]
@@ -131,6 +135,49 @@ def run_all(X, y, groups, folds=None):
     return all_results.groupby("model")[metrics].agg(["mean", "std"])
 
 
+# Settings to try for each model. 
+PARAM_GRIDS = {
+    "ridge": (
+        make_pipeline(StandardScaler(), Ridge()),
+        {"ridge__alpha": np.logspace(-3, 3, 13)}, # 0.001 to 1000, how hard the weights are pushed towards 0
+    ),
+    "random_forest": (
+        RandomForestRegressor(n_estimators=300, random_state=0, n_jobs=-1),
+        {
+            "max_depth": [None, 10, 20], # How deep each tree can grow
+            "min_samples_leaf": [1, 3, 5], # Fewest rows allowed in an end leaf
+            "max_features": [1.0, 0.5], # Share of the features each split can look at
+        },
+    ),
+    "hist_gradient_boosting": (
+        HistGradientBoostingRegressor(random_state=0),
+        {
+            "learning_rate": [0.03, 0.1, 0.3], # How big each correction step is
+            "max_leaf_nodes": [15, 31], # Size of each small tree
+            "min_samples_leaf": [10, 20, 40],
+        },
+    ),
+}
+
+
+def tune_all(X, y, folds):
+    # Try every combination in the grid and keep the one with the lowest average RMSE.
+    # Train.csv is used here, test.csv is kept hidden.
+    cv = PredefinedSplit(folds)
+    tuned, rows = {}, []
+    for name, (model, grid) in PARAM_GRIDS.items():
+        search = GridSearchCV(model, grid, cv=cv, scoring="neg_root_mean_squared_error", n_jobs=-1)
+        search.fit(X, y) # After the search, the best setting is retrained on all of train
+        best = search.best_index_
+        rows.append({
+            "model": name,
+            "rmse_mean": -search.best_score_, # sklearn gives negative RMSE so higher is better, flip it back
+            "rmse_std": search.cv_results_["std_test_score"][best],
+            "best_params": search.best_params_,
+        })
+        tuned[name] = search.best_estimator_
+    return tuned, pd.DataFrame(rows).set_index("model")
+
 
 if __name__ == "__main__":
     self_test()
@@ -139,4 +186,39 @@ if __name__ == "__main__":
  
     print("rows:", len(X), " features:", len(X.columns), " groups:", groups.nunique())
     print()
+    print("Default settings, 5-fold grouped CV")
     print(run_all(X, y, groups, folds).round(3))
+
+    print()
+    print("Tuned settings, 5-fold grouped CV")
+    tuned, summary = tune_all(X, y, folds)
+    print(summary.round(3))
+
+    # Pick the model with the lowest Cross validation error. 
+    best_name = summary["rmse_mean"].idxmin()
+    final_model = tuned[best_name]
+
+    # Unseen data, the groups in test.csv were never used for training
+    X_test, y_test, _, _ = load_clean("Data/test.csv")
+    X_test = X_test[X.columns]
+    y_pred = final_model.predict(X_test)
+
+    # Basquin baseline trained on all of train
+    test_results = pd.DataFrame({
+        "basquin_baseline": compute_metrics(y_test, basquin_baseline(X, y, X_test)),
+        best_name: compute_metrics(y_test, y_pred),
+    }).T
+    print()
+    print(f"Test set ({len(X_test)} rows, {X_test.shape[1]} features), final model: {best_name}")
+    print(test_results.round(3))
+
+    # A few example predictions, back in number of cycles instead of log10
+    sample = pd.DataFrame({
+        "sigma_a": X_test["sigma_a"],
+        "true_Nf": 10 ** y_test,
+        "pred_Nf": 10 ** y_pred,
+        "ratio": 10 ** (y_pred - y_test), # 1.0 is perfect, 2.0 means predicted twice the real lifetime
+    }).sample(10, random_state=0)
+    print()
+    print("Sample predictions on the test set")
+    print(sample.round({"true_Nf": 0, "pred_Nf": 0, "ratio": 2}).to_string())
