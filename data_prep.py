@@ -1,12 +1,12 @@
-# %%
 import os
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import GroupShuffleSplit
+from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold
 
 INCLUDE_RUNOUTS = False
 RUNOUT_LIMIT = 1e7
 TEST_SIZE = 0.2
+N_FOLDS = 5
 SEED = 42
 
 TEMP_COLS = ["Normalizing temp", "Quenching temp", "Tempering temp"]
@@ -15,10 +15,9 @@ DROP_COLS = ["DS No. PDF", "Heat", "Upper yield stress", "True fracture stress"]
 steps = []
 
 df = pd.read_excel("Dataset/NIMS_FATIGUE.xlsx")
-df.columns = df.columns.str.strip()  # trailing space in one name
+df.columns = df.columns.str.strip()
 steps.append(("loaded", len(df)))
 
-# dups only for failed tests, runouts repeat naturally
 is_duplicate = df.duplicated() & (df["Nf"] < RUNOUT_LIMIT)
 df = df[~is_duplicate].reset_index(drop=True)
 steps.append(("duplicates removed (failed tests only)", len(df)))
@@ -29,7 +28,6 @@ steps.append(("proof stress > tensile strength removed", len(df)))
 
 df = df.drop(columns=DROP_COLS)
 
-# group = same steel state, keep together in split
 state_cols = [c for c in df.columns if c not in ("Nf", "σa", "Type of test")]
 df["group"] = df.groupby(state_cols, dropna=False).ngroup()
 steps.append((f"groups made ({df['group'].nunique()} material states)", len(df)))
@@ -54,7 +52,14 @@ if not INCLUDE_RUNOUTS:
 steps.append(("after run-out choice: train rows", len(train)))
 steps.append(("after run-out choice: test rows", len(test)))
 
-# flag + train median for missing temps
+mat_cols = [c for c in train.columns if c.startswith("mat_")]
+grade = train[mat_cols].idxmax(axis=1)
+cv = StratifiedGroupKFold(n_splits=N_FOLDS, shuffle=True, random_state=SEED)
+train["fold"] = -1
+for k, (_, val_idx) in enumerate(cv.split(train, grade, groups=train["group"])):
+    train.iloc[val_idx, train.columns.get_loc("fold")] = k
+test["fold"] = -1
+
 for col in TEMP_COLS:
     train[col + " missing"] = train[col].isna().astype(int)
     test[col + " missing"] = test[col].isna().astype(int)
@@ -71,13 +76,17 @@ test = test.drop(columns=same_flag)
 assert train.isna().sum().sum() == 0 and test.isna().sum().sum() == 0, "missing values left"
 assert not set(train["group"]) & set(test["group"]), "a group is in both train and test"
 assert train.select_dtypes(exclude="number").empty, "non-numeric column left"
+assert train.groupby("group")["fold"].nunique().max() == 1, "a group is split over folds"
+assert sorted(train["fold"].unique()) == list(range(N_FOLDS)), "empty fold"
 
 print("Step log (rows after each step)")
 for name, n in steps:
     print(f"  {name}: {n}")
 print("\nMaterial counts in train / test")
-mat_cols = [c for c in train.columns if c.startswith("mat_")]
 print(pd.DataFrame({"train": train[mat_cols].sum(), "test": test[mat_cols].sum()}))
+print("\nRows and groups per fold")
+print(train.groupby("fold").agg(rows=("group", "size"), groups=("group", "nunique")))
+print(train.groupby("fold")[mat_cols].sum())
 print("\nType of test (1 = uniaxial): train / test mean")
 print(train["Type of test"].mean().round(3), test["Type of test"].mean().round(3))
 print("\nlog10_Nf describe")
