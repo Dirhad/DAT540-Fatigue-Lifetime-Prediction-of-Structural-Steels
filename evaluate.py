@@ -19,6 +19,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.base import clone
 import warnings
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
 
@@ -39,7 +40,7 @@ COLLINEAR_BLOCKS = {
 TRAIN_PATH = "Data/train.csv"
 
 # Train with: "Data/train.csv" Test with: "Data/train_with_runouts.csv" 
-def load_clean(path=TRAIN_PATH):
+def load_clean(path=TRAIN_PATH ):
     # Load Data 1's cleaned split
     df = pd.read_csv(path)
     df = df.rename(columns={"σa": "sigma_a"}) #rename to sigma_a
@@ -280,4 +281,4 @@ if __name__ == "__main__":
     }).sample(10, random_state=0)
     print("Sample predictions on the test set")
     print(sample.round({"sigma_a": 0, "true_Nf": 0, "pred_Nf": 0, "ratio": 2}).to_string())
-
+ 
