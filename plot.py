@@ -1,19 +1,30 @@
+"""Builds the three report figures from the pipeline in evaluate.py.
 
+    python plots.py          -> figures/*.png, plus the numbers for the captions
+
+Takes a couple of minutes: the grid search from evaluate.py is re-run here so
+the figures can never show numbers that differ from the ones evaluate.py
+printed. Caching the fitted models to disk would be faster and would add a
+staleness problem that is not worth it at this runtime.
+
+The figures carry no titles. Each one gets a caption in the report that states
+the finding; a title inside the image would repeat it and cost vertical space
+on a four-page limit. The summary printed at the end gives the numbers each
+caption needs, including the noise floor, which has no figure of its own.
+"""
 
 import os
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
+from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 
-from evaluate import (load_clean, tune_all, feature_importance,
-                      basquin_baseline)
+from evaluate import load_clean, tune_all, feature_importance, basquin_baseline
 
 OUT = "figures"
 TRAIN = "Data/train.csv"
 TEST = "Data/test.csv"
-TEST_UNCENSORED = "Data/test_with_runouts.csv"   # only for the run-out share
 
 BLUE = "#2a78d6"     # models
 GREY = "#8c8a84"     # baseline, reference material
@@ -76,11 +87,19 @@ def repeat_test_scatter(df):
 
     Slightly overestimated, because the preprocessing dropped exact duplicate
     rows, which removes replicate pairs that happened to share a rounded life.
+
+    No figure of its own; it is reported as a number next to the CV error.
     """
     cell = df.groupby(["group", "sigma_a", "Type of test"])["log10_Nf"]
     residual = (df["log10_Nf"] - cell.transform("mean"))[cell.transform("size") > 1]
     n_cells = int((cell.size() > 1).sum())
     return np.sqrt((residual ** 2).sum() / (len(residual) - n_cells))
+
+
+def basquin_line(stress, log_nf):
+    """Least-squares Basquin fit, log10 Nf = a + b log10 stress. Returns the line."""
+    b, a = np.polyfit(np.log10(stress), log_nf, 1)
+    return lambda s: a + b * np.log10(s)
 
 
 def fig1_predicted_vs_measured(y_test, preds, best_name):
@@ -128,16 +147,15 @@ def fig1_predicted_vs_measured(y_test, preds, best_name):
     save(fig, "1_predicted_vs_measured")
 
 
-
-
-def fig2_feature_importance(imp):
+def fig2_feature_importance(imp, top=6):
     """Which columns does the delivered model actually rely on?
 
-    Only columns whose effect clears three times their own scatter. The rest
-    sit at zero within noise, and listing them implies a ranking that the data
-    does not support.
+    The top six, ranked. No significance threshold: the error bars show where
+    the ranking stops meaning anything, and a cut-off in code would hide that
+    judgement from the reader. An earlier version used one and silently dropped
+    loading mode, which is a real effect.
     """
-    keep = imp.sort_values("mean").tail(6)
+    keep = imp.sort_values("mean").tail(top)
     fig, ax = plt.subplots(figsize=(7.2, 0.45 * len(keep) + 1.1))
 
     ax.barh(range(len(keep)), keep["mean"], xerr=keep["std"], height=0.62,
@@ -157,91 +175,143 @@ def fig2_feature_importance(imp):
     return keep
 
 
+def fig3_sn_curves(df, n_drawn=6):
+    """S-N curves for different tensile strengths, collected in one plot.
 
-def fig3_sn_curves(train, n_states=5):
-    """Why does Basquin fail across materials when it holds within one?
+    Drawn the way S-N curves are read in the textbook: stress amplitude on a
+    linear axis from zero, life on a log axis, one curve per material, labelled
+    at its end instead of in a legend. A Basquin line (straight in log-log)
+    therefore shows as a curve that flattens towards long lives.
 
-    One line per material state, plus the pooled fit the baseline actually
-    uses. The individual curves are near-parallel but sit at different levels,
-    so a single line through all of them cannot follow any of them.
+    Choices that matter for reading it:
+    - One loading mode only, the most common one. Axial and bending curves of
+      the same steel sit at different heights, so mixing them on one set of
+      axes would show a loading-mode effect and call it a strength effect.
+    - One curve per tensile strength. Material states that share a UTS value
+      are pooled into that curve.
+    - Curves are picked to spread over the UTS range, not by sample size,
+      because the strength effect is what the figure is for.
+    - The fit is log10 Nf on log10 sigma_a (ASTM E739) and is drawn only over
+      the stresses that were tested. No fatigue limit is drawn: Basquin has
+      none, and a plateau needs runouts around 10^6-10^7 cycles to support it.
+    - The measured points stay in, faint. Curves alone would hide the scatter
+      the rest of the report is about.
 
-    States are picked deterministically: those with at least 12 specimens
-    spanning more than 100 MPa, then spread evenly across tensile strength so
-    the vertical offset between curves is visible rather than accidental.
+    The pooled per-state RMSE is computed over every (group, loading mode)
+    state with 3+ failures at 2+ stress levels, as before, for main()'s ladder.
     """
-    stats = train.groupby("group").agg(n=("sigma_a", "size"),
-                                       tensile=("Tensile strength", "first"),
-                                       span=("sigma_a", lambda s: s.max() - s.min()))
-    usable = stats[(stats["n"] >= 12) & (stats["span"] > 100)].sort_values("tensile")
-    picked = usable.index[np.linspace(0, len(usable) - 1, n_states).astype(int)]
+    failed = (~df["runout"].astype(bool)).to_numpy() if "runout" in df.columns \
+        else np.ones(len(df), dtype=bool)
+    df = df.assign(failed=failed)
+    ok = df[df["failed"]]
+
+    # Numbers for main(): per-state Basquin and the two pooled views
+    residuals, n_states = [], 0
+    for _, fit in ok.groupby(["group", "Type of test"]):
+        if len(fit) < 3 or fit["sigma_a"].nunique() < 2:
+            continue
+        line = basquin_line(fit["sigma_a"], fit["log10_Nf"])
+        residuals.append(fit["log10_Nf"] - line(fit["sigma_a"]))
+        n_states += 1
+    residuals = pd.concat(residuals)
+    raw = basquin_line(ok["sigma_a"], ok["log10_Nf"])
+    ratio = ok["sigma_a"] / ok["Tensile strength"]
+    norm = basquin_line(ratio, ok["log10_Nf"])
+    within_state = {
+        "per_state": np.sqrt((residuals ** 2).sum() / (len(residuals) - 2 * n_states)),
+        "n_states": n_states,
+        "global_raw": np.sqrt(np.mean((ok["log10_Nf"] - raw(ok["sigma_a"])) ** 2)),
+        "global_norm": np.sqrt(np.mean((ok["log10_Nf"] - norm(ratio)) ** 2)),
+    }
+
+    # The curves: one loading mode, one curve per tensile strength
+    mode = ok["Type of test"].value_counts().idxmax()
+    in_mode = df[df["Type of test"] == mode]
+    candidates = [(uts, cell) for uts, cell in in_mode.groupby("Tensile strength")
+                  if cell["failed"].sum() >= 5 and cell.loc[cell["failed"], "sigma_a"].nunique() >= 3]
+    pick = np.unique(np.linspace(0, len(candidates) - 1, min(n_drawn, len(candidates))).round().astype(int))
+    shown = [candidates[i] for i in pick]
+    colors = plt.cm.Blues(np.linspace(0.5, 0.95, len(shown)))
 
     fig, ax = plt.subplots(figsize=(7.2, 4.0))
-    shades = plt.cm.viridis(np.linspace(0.08, 0.88, len(picked)))
+    ends, rows = [], []
+    for (uts, cell), color in zip(shown, colors):
+        fit = cell[cell["failed"]]
+        line = basquin_line(fit["sigma_a"], fit["log10_Nf"])
+        s = np.linspace(fit["sigma_a"].min(), fit["sigma_a"].max(), 100)
 
-    for colour, state in zip(shades, picked):
-        rows = train[train["group"] == state]
-        ax.scatter(10 ** rows["log10_Nf"], rows["sigma_a"], s=16, color=colour,
-                   alpha=0.75, edgecolors="white", linewidths=0.4, zorder=3)
-        # Basquin within one state: a straight line in log-log.
-        slope, intercept = np.polyfit(np.log10(rows["sigma_a"]), rows["log10_Nf"], 1)
-        grid = np.linspace(rows["sigma_a"].min(), rows["sigma_a"].max(), 50)
-        ax.plot(10 ** (intercept + slope * np.log10(grid)), grid, color=colour,
-                linewidth=1.5, zorder=2,
-                label=f"{stats.loc[state, 'tensile']:.0f} MPa tensile")
+        ax.scatter(10 ** fit["log10_Nf"], fit["sigma_a"], s=10, color=color, alpha=0.35,
+                   edgecolors="none", zorder=2)
+        runouts = cell[~cell["failed"]]
+        if len(runouts):
+            ax.scatter(10 ** runouts["log10_Nf"], runouts["sigma_a"], marker=">", s=16,
+                       color=color, alpha=0.6, zorder=2)
+        ax.plot(10 ** line(s), s, color=color, linewidth=1.8, zorder=3)
 
-    # The single line the baseline fits through every material at once.
-    slope, intercept = np.polyfit(np.log10(train["sigma_a"]), train["log10_Nf"], 1)
-    grid = np.linspace(train["sigma_a"].min(), train["sigma_a"].max(), 50)
-    ax.plot(10 ** (intercept + slope * np.log10(grid)), grid, color=RED,
-            linewidth=2, linestyle="--", zorder=4, label="Pooled fit (baseline)")
+        ends.append([10 ** line(s[0]), s[0], f"UTS {uts:.0f} MPa", color])
+        b = 1 / np.polyfit(np.log10(fit["sigma_a"]), fit["log10_Nf"], 1)[0]
+        rows.append({"UTS (MPa)": uts, "n": len(fit), "b": round(b, 3)})
 
-    ax.set(xscale="log", yscale="log",
-           xlabel="Cycles to failure", ylabel=r"Stress amplitude $\sigma_a$ (MPa)")
+    # Labels in one column right of all the data, in the same order as the curves'
+    # ends, pushed apart if they collide, each tied to its curve by a thin leader.
+    # Labels placed at each curve's own end ended up out of order and on top of points.
+    lives = 10 ** in_mode["log10_Nf"]
+    top = in_mode["sigma_a"].max() * 1.1
+    gap = 0.055 * top
+    label_x = lives.max() * 2.5
+    ends.sort(key=lambda e: e[1])
+    label_y = [e[1] for e in ends]
+    for i in range(1, len(label_y)):
+        label_y[i] = max(label_y[i], label_y[i - 1] + gap)
+    for (x, y_end, text, color), y_label in zip(ends, label_y):
+        ax.plot([x * 1.08, label_x / 1.1], [y_end, y_label], color=color, linewidth=0.6, alpha=0.7)
+        ax.text(label_x, y_label, text, va="center", fontsize=8, color=color)
+
+    ax.set(xscale="log", xlim=(lives.min() / 1.5, label_x * 6), ylim=(0, top),
+           xlabel="Cycles to failure $N_f$", ylabel=r"Stress amplitude $\sigma_a$ (MPa)")
     ax.xaxis.set_major_formatter(FuncFormatter(decade))
-    ax.yaxis.set_major_formatter(plt.ScalarFormatter())
-    ax.yaxis.set_minor_formatter(plt.NullFormatter())
-    ax.set_yticks([200, 300, 400, 600, 900])
-    ax.legend(frameon=False, loc="upper right", ncol=2)
+    ax.text(0.98, 0.97, f"loading mode: {mode}\nBasquin fit, drawn over tested stresses only",
+            transform=ax.transAxes, ha="right", va="top", fontsize=8, color=GREY)
     ax.grid(color="#eceae4", linewidth=0.6)
     ax.set_axisbelow(True)
     save(fig, "3_sn_curves")
 
-    within = train.groupby("group").apply(
-        lambda d: np.corrcoef(np.log10(d["sigma_a"]), d["log10_Nf"])[0, 1]
-        if len(d) > 3 else np.nan, include_groups=False)
-    return within.median()
+    within_state["mode"] = mode
+    within_state["curves"] = pd.DataFrame(rows).set_index("UTS (MPa)")
+    return within_state, len(shown)
+
 
 def main():
     X, y, groups, folds = load_clean(TRAIN)
     X_test, y_test, _, _ = load_clean(TEST)
     X_test = X_test[X.columns]          # same column order as training
     train = pd.read_csv(TRAIN).rename(columns={"σa": "sigma_a"})
- 
+
     print("Tuning (this is the slow part)...")
     tuned, summary = tune_all(X, y, folds)
     best_name = summary["rmse_mean"].idxmin()
     final_model = tuned[best_name]
- 
+
     # Only the two models figure 1 shows.
     preds = {"basquin_baseline": basquin_baseline(X, y, X_test),
              best_name: final_model.predict(X_test)}
- 
+
     floor = repeat_test_scatter(train)
     # 30 repeats, not 10: with 10 the spread was large enough that the ranking
     # of the smaller features moved between runs.
     importance = feature_importance(final_model, X, y, folds, n_repeats=30)
- 
+
     print("\nFigures")
     fig1_predicted_vs_measured(y_test, preds, best_name)
     kept = fig2_feature_importance(importance)
-    within_state = fig3_sn_curves(train)
- 
+    within_state, drawn = fig3_sn_curves(train)
+
     # Everything a caption or a sentence in the report needs, in one place.
     cv_best = summary.loc[best_name, "rmse_mean"]
     print(f"\nFinal model: {best_name}")
     print(f"Repeat-test scatter (noise floor): {floor:.3f}")
     print(f"Best model CV RMSE: {cv_best:.3f}  ->  {cv_best - floor:.3f} above the floor")
- 
+
     print("\nFig 1, test set")
     for name in ["basquin_baseline", best_name]:
         error = preds[name] - y_test
@@ -249,12 +319,25 @@ def main():
         print(f"  {MODEL_NAMES[name]:18s} RMSE {rmse:.3f}"
               f"  within factor 2 {np.mean(np.abs(error) < np.log10(2)):.1%}"
               f"  typical miss factor {10 ** rmse:.1f}")
- 
+
     print("\nFig 2, feature importance")
     print(kept.sort_values("mean", ascending=False)[["mean", "std"]].round(3).to_string())
- 
-    print(f"\nFig 3, median within-state correlation "
-          f"log(sigma_a) vs log(Nf): {within_state:.2f}")
+
+    # The ladder the S-N figure is read against. Train, in-sample Basquin fits
+    # next to the model's CV error on unseen material states.
+    print(f"\nFig 3, S-N curves (train, {drawn} of {within_state['n_states']} states drawn)")
+    ladder = [
+        ("Noise floor (repeat tests)", floor),
+        (f"Basquin per state, in-sample ({within_state['n_states']} states)", within_state["per_state"]),
+        (f"{MODEL_NAMES[best_name]}, CV on unseen states", cv_best),
+        ("Basquin on sigma_a / UTS, in-sample", within_state["global_norm"]),
+        ("Global Basquin on sigma_a, in-sample", within_state["global_raw"]),
+    ]
+    for label, value in sorted(ladder, key=lambda row: row[1]):
+        print(f"  {label:48s} RMSE {value:.3f}  (miss factor {10 ** value:.1f})")
+    print(f"\n  Curves drawn ({within_state['mode']}), b in sigma_a = sigma_f' (2Nf)^b")
+    print(within_state["curves"].to_string())
+
 
 if __name__ == "__main__":
     main()
