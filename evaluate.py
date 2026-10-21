@@ -238,7 +238,7 @@ if __name__ == "__main__":
     print("5-fold grouped CV, default settings")
     print(default.round(3), "\n")
 
-    # Tuning: compare the gain against the spread between folds.
+    # Tuning, compare the gain against the spread between folds.
     # If gain < fold_std the improvement is smaller than the noise.
     tuned, summary = tune_all(X, y, folds)
     gain = pd.DataFrame({
