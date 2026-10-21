@@ -1,17 +1,4 @@
-"""Builds the four report figures from the pipeline in evaluate.py.
 
-    python plots.py          -> figures/*.png, plus the numbers for the captions
-
-Takes a couple of minutes: the grid search from evaluate.py is re-run here so
-the figures can never show numbers that differ from the ones evaluate.py
-printed. Caching the fitted models to disk would be faster and would add a
-staleness problem that is not worth it at this runtime.
-
-The figures carry no titles. Each one gets a caption in the report that states
-the finding; a title inside the image would repeat it and cost vertical space
-on a four-page limit. The summary printed at the end gives the numbers each
-caption needs.
-"""
 
 import os
 
@@ -21,7 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 
 from evaluate import (load_clean, tune_all, feature_importance,
-                      basquin_baseline, cross_validate_folds, sklearn_fit_predict)
+                      basquin_baseline)
 
 OUT = "figures"
 TRAIN = "Data/train.csv"
@@ -166,7 +153,7 @@ def fig2_feature_importance(imp):
             transform=ax.transAxes, ha="right", fontsize=8, color=RED)
     ax.grid(axis="x", color="#eceae4", linewidth=0.6)
     ax.set_axisbelow(True)
-    save(fig, "3_feature_importance")
+    save(fig, "2_feature_importance")
     return keep
 
 
@@ -217,67 +204,57 @@ def fig3_sn_curves(train, n_states=5):
     ax.legend(frameon=False, loc="upper right", ncol=2)
     ax.grid(color="#eceae4", linewidth=0.6)
     ax.set_axisbelow(True)
-    save(fig, "5_sn_curves")
+    save(fig, "3_sn_curves")
 
     within = train.groupby("group").apply(
         lambda d: np.corrcoef(np.log10(d["sigma_a"]), d["log10_Nf"])[0, 1]
         if len(d) > 3 else np.nan, include_groups=False)
     return within.median()
 
-
 def main():
     X, y, groups, folds = load_clean(TRAIN)
     X_test, y_test, _, _ = load_clean(TEST)
     X_test = X_test[X.columns]          # same column order as training
-
+    train = pd.read_csv(TRAIN).rename(columns={"σa": "sigma_a"})
+ 
     print("Tuning (this is the slow part)...")
     tuned, summary = tune_all(X, y, folds)
     best_name = summary["rmse_mean"].idxmin()
     final_model = tuned[best_name]
-
-    preds = {"basquin_baseline": basquin_baseline(X, y, X_test)}
-    for name, model in tuned.items():
-        preds[name] = model.predict(X_test)
-
-    # Per-fold CV error for every model, so figure 2 can show the folds.
-    per_fold = []
-    for name, model in {"basquin_baseline": None, **tuned}.items():
-        fit_predict = basquin_baseline if model is None else sklearn_fit_predict(model)
-        result = cross_validate_folds(fit_predict, X, y, folds)
-        result["model"] = name
-        per_fold.append(result)
-    per_fold = pd.concat(per_fold, ignore_index=True)
-
-    train = pd.read_csv(TRAIN).rename(columns={"σa": "sigma_a"})
+ 
+    # Only the two models figure 1 shows.
+    preds = {"basquin_baseline": basquin_baseline(X, y, X_test),
+             best_name: final_model.predict(X_test)}
+ 
     floor = repeat_test_scatter(train)
-    importance = feature_importance(final_model, X, y, folds)
-
+    # 30 repeats, not 10: with 10 the spread was large enough that the ranking
+    # of the smaller features moved between runs.
+    importance = feature_importance(final_model, X, y, folds, n_repeats=30)
+ 
     print("\nFigures")
     fig1_predicted_vs_measured(y_test, preds, best_name)
-    fig2_model_comparison(per_fold, floor)
-    kept = fig3_feature_importance(importance)
-    censoring = fig4_residuals_vs_stress(y_test, preds, best_name, X_test["sigma_a"])
-    within_state = fig5_sn_curves(train)
-
-    # Everything a caption needs, in one place.
+    kept = fig2_feature_importance(importance)
+    within_state = fig3_sn_curves(train)
+ 
+    # Everything a caption or a sentence in the report needs, in one place.
+    cv_best = summary.loc[best_name, "rmse_mean"]
     print(f"\nFinal model: {best_name}")
     print(f"Repeat-test scatter (noise floor): {floor:.3f}")
-    print(f"Best model CV RMSE: {summary.loc[best_name, 'rmse_mean']:.3f}"
-          f"  -> {summary.loc[best_name, 'rmse_mean'] - floor:.3f} above the floor")
+    print(f"Best model CV RMSE: {cv_best:.3f}  ->  {cv_best - floor:.3f} above the floor")
+ 
     print("\nFig 1, test set")
     for name in ["basquin_baseline", best_name]:
         error = preds[name] - y_test
-        print(f"  {MODEL_NAMES[name]:18s} RMSE {np.sqrt(np.mean(error**2)):.3f}"
+        rmse = np.sqrt(np.mean(error ** 2))
+        print(f"  {MODEL_NAMES[name]:18s} RMSE {rmse:.3f}"
               f"  within factor 2 {np.mean(np.abs(error) < np.log10(2)):.1%}"
-              f"  typical miss factor {10**np.sqrt(np.mean(error**2)):.1f}")
-    print("\nFig 2, CV per model")
-    print(per_fold.groupby("model")["rmse"].agg(["mean", "std", "min", "max"]).round(3).to_string())
-    print("\nFig 3, features above noise")
+              f"  typical miss factor {10 ** rmse:.1f}")
+ 
+    print("\nFig 2, feature importance")
     print(kept.sort_values("mean", ascending=False)[["mean", "std"]].round(3).to_string())
-    print("\nFig 4, bias against censoring")
-    print(censoring.round(3).to_string())
-    print(f"\nFig 5, median within-state correlation log(sigma_a) vs log(Nf): {within_state:.2f}")
-
+ 
+    print(f"\nFig 3, median within-state correlation "
+          f"log(sigma_a) vs log(Nf): {within_state:.2f}")
 
 if __name__ == "__main__":
     main()
