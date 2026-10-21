@@ -1,207 +1,287 @@
-# Makes the figures for the report. Saves them as PNG in figures/
-# Run evaluate.py first if you want the numbers, this file only draws.
+# Builds the four report figures as PNG in figures/.
+#
+# Figures carry no titles. In the report the caption below each figure states
+# the finding, and a title inside the image would only repeat it and eat
+# vertical space on a four-page limit.
 
 import os
+import warnings
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter, PercentFormatter
 
-from evaluate import load_clean, tune_all, basquin_baseline, cross_validate_folds
+from evaluate import (load_clean, tune_all, feature_importance,
+                      basquin_baseline, cross_validate_folds, sklearn_fit_predict)
 
+warnings.filterwarnings("ignore", category=UserWarning)
 
 OUT = "figures"
 
-# Fixed colors, one per steel grade (same grade = same color)
-GRADE_COLORS = {
-    "S25C": "#2a78d6",
-    "S35C": "#eb6834",
-    "S40C": "#1baf7a",
-    "S45C": "#eda100",
-    "S55C": "#e87ba4",
+MAIN = "#2a78d6"     # models
+GREY = "#8c8a84"     # baseline, reference lines
+ACCENT = "#b03030"   # the one thing the reader should notice
+BAND = "#dfe8f5"     # factor-two band
+INK = "#3f3e3c"
+
+LABELS = {
+    "basquin_baseline": "Basquin baseline",
+    "ridge": "Ridge",
+    "random_forest": "Random forest",
+    "hist_gradient_boosting": "Gradient boosting",
 }
-MAIN = "#2a78d6" # Color for single-series plots
-GREY = "#898781" # Baseline, reference lines
-INK = "#52514e"  # Text and axes
 
 plt.rcParams.update({
     "figure.dpi": 110,
-    "savefig.dpi": 200,
-    "font.size": 10,
-    "axes.edgecolor": "#c3c2b7",
+    "savefig.dpi": 220,
+    "font.size": 9,
+    "axes.edgecolor": "#c9c7c0",
     "axes.labelcolor": INK,
+    "axes.labelsize": 9,
+    "text.color": INK,
     "xtick.color": INK,
     "ytick.color": INK,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
     "axes.spines.top": False,
     "axes.spines.right": False,
-    "axes.grid": True,
-    "grid.color": "#e1e0d9",
-    "grid.linewidth": 0.6,
+    "legend.fontsize": 8,
 })
 
 
 def save(fig, name):
     os.makedirs(OUT, exist_ok=True)
-    fig.tight_layout()
     fig.savefig(f"{OUT}/{name}.png", bbox_inches="tight")
     plt.close(fig)
     print("saved", f"{OUT}/{name}.png")
 
 
+def sci(v, _):
+    """Axis labels as 10^n rather than 1e+06."""
+    return f"$10^{{{int(np.log10(v))}}}$"
+
+
 def replicate_scatter(df):
-    # Same steel, same stress, same test type, but still different lifetimes. That spread is noise
-    # no model can explain, so it is the lowest RMSE we can hope for
+    """Spread between repeat tests at identical conditions.
+
+    Same material, same stress, same test type, different measured lives. No
+    model can explain that, so it is the lowest RMSE anything could reach.
+    """
     cell = df.groupby(["group", "sigma_a", "Type of test"])["log10_Nf"]
     size = cell.transform("size")
     resid = (df["log10_Nf"] - cell.transform("mean"))[size > 1]
     n_cells = (cell.size() > 1).sum()
-    return np.sqrt((resid ** 2).sum() / (len(resid) - n_cells)) 
+    return np.sqrt((resid ** 2).sum() / (len(resid) - n_cells))
 
 
-def plot_target_distribution(raw):
-    # Why the target is log10(Nf) and why run-outs are left out. Uses the raw Excel file.
-    nf = raw["Nf"]
-    runout = nf >= 1e7
-    fig, (left, right) = plt.subplots(1, 2, figsize=(9, 3.5))
-
-    left.hist(nf[~runout], bins=40, color=MAIN)
-    left.set_xlabel("Cycles to failure, Nf")
-    left.set_ylabel("Number of tests")
-    left.set_title(f"Failed tests, raw Nf (skew {nf[~runout].skew():.1f})", loc="left", fontsize=10)
-
-    bins = np.linspace(4, 10, 49)
-    right.hist(np.log10(nf[~runout]), bins=bins, color=MAIN, label=f"Failed ({(~runout).sum()})")
-    right.hist(np.log10(nf[runout]), bins=bins, color=GREY, label=f"Run-out, Nf ≥ 10⁷ ({runout.sum()})")
-    right.axvline(7, color=INK, linestyle="--", linewidth=1)
-    right.set_xlabel("log10(Nf)")
-    right.set_title(f"All tests, log scale (skew of failed {np.log10(nf[~runout]).skew():.1f})", loc="left", fontsize=10)
-    right.legend(frameon=False, fontsize=8)
-    for ax in (left, right):
-        ax.grid(axis="x", visible=False)
-    save(fig, "1_target_distribution")
-
-
-def plot_sn_curves(df):
-    # S-N data, raw stress and stress divided by tensile strength. 
-    grade = df[[f"mat_{g}" for g in GRADE_COLORS]].idxmax(axis=1).str[4:]
-    ratio = df["sigma_a"] / df["Tensile strength"]
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2), sharex=True)
-    for ax, y, label in [(axes[0], df["sigma_a"], "Stress amplitude σa (MPa)"),
-                         (axes[1], ratio, "σa / tensile strength")]:
-        for g, color in GRADE_COLORS.items():
-            rows = grade == g
-            ax.scatter(10 ** df.loc[rows, "log10_Nf"], y[rows], s=10, color=color, alpha=0.7,
-                       edgecolors="white", linewidths=0.4, label=f"{g} ({rows.sum()})")
-        r = np.corrcoef(y, df["log10_Nf"])[0, 1]
-        ax.set_title(f"{label.split(' (')[0]}, r = {r:.2f} with log10(Nf)", loc="left", fontsize=10)
-        ax.set_ylabel(label)
-        ax.set_xscale("log")
-        ax.set_xlabel("Cycles to failure, Nf (log scale)")
-    axes[1].legend(title="Grade (rows)", frameon=False, fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1))
-    fig.suptitle("S-N data per steel grade (train set)", x=0.02, ha="left")
-    save(fig, "2_sn_curves")
-
-
-def plot_correlation(df):
-    # Correlation between the numeric inputs and the target
-    cols = ["sigma_a", "0.2% proof stress", "Tensile strength", "Vickers hardness", "Elongation",
-            "Reduction of area", "Tempering temp", "Quenching temp", "Normalizing temp",
-            "Reduction Ratio", "dA", "dB", "dC", "log10_Nf"]
-    corr = df[cols].corr()
-    corr = corr.where(np.tril(np.ones(corr.shape, dtype=bool)))
-    fig, ax = plt.subplots(figsize=(7.5, 6.5))
-    im = ax.imshow(corr, cmap="RdBu_r", vmin=-1, vmax=1)
-    for i in range(len(cols)):
-        for j in range(i + 1):
-            v = corr.iloc[i, j]
-            ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=7,
-                    color="white" if abs(v) > 0.6 else INK)
-    ax.set_xticks(range(len(cols)), cols, rotation=90)
-    ax.set_yticks(range(len(cols)), cols)
-    ax.grid(False)
-    ax.spines[["left", "bottom"]].set_visible(False)
-    fig.colorbar(im, ax=ax, shrink=0.7, label="Pearson r")
-    ax.set_title("Correlation between features and log10(Nf) (train set)", loc="left")
-    save(fig, "3_correlation")
-
-
+# --------------------------------------------------------------------------
+# 1. Baseline against the final model on the held-out test set
+# --------------------------------------------------------------------------
 def plot_pred_vs_true(y_test, preds, best_name):
-    # Predicted vs true on the test set, one panel per model.
-    fig, axes = plt.subplots(2, 2, figsize=(8, 8), sharex=True, sharey=True)
-    all_values = np.concatenate([y_test] + list(preds.values()))
-    lo, hi = 10 ** all_values.min() / 1.5, 10 ** all_values.max() * 1.5
-    line = np.array([lo, hi])
-    for ax, (name, y_pred) in zip(axes.flat, preds.items()):
-        ax.plot(line, line, color=INK, linewidth=1, label="Perfect prediction")
-        ax.plot(line, line * 2, color=GREY, linewidth=1, linestyle="--", label="Factor 2")
-        ax.plot(line, line / 2, color=GREY, linewidth=1, linestyle="--")
-        color = GREY if name == "basquin_baseline" else MAIN
-        ax.scatter(10 ** y_test, 10 ** y_pred, s=12, color=color, alpha=0.6, edgecolors="white", linewidths=0.4)
+    """Two panels only. Ridge and random forest live in the results table;
+    putting all four here would halve the size of the contrast that matters."""
+    shown = ["basquin_baseline", best_name]
+    fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.8), sharex=True, sharey=True)
+
+    values = np.concatenate([np.asarray(y_test)] + [np.asarray(preds[k]) for k in shown])
+    lo, hi = 10 ** values.min() / 1.6, 10 ** values.max() * 1.6
+    edge = np.array([lo, hi])
+
+    for ax, name in zip(axes, shown):
+        y_pred = np.asarray(preds[name])
+        ax.fill_between(edge, edge / 2, edge * 2, color=BAND, zorder=0)
+        ax.plot(edge, edge, color=INK, linewidth=0.9, zorder=1)
+
+        colour = GREY if name == "basquin_baseline" else ACCENT
+        ax.scatter(10 ** y_test, 10 ** y_pred, s=11, color=colour, alpha=0.55,
+                   edgecolors="white", linewidths=0.3, zorder=2)
+
         rmse = np.sqrt(np.mean((y_pred - y_test) ** 2))
         within = np.mean(np.abs(y_pred - y_test) < np.log10(2))
-        ax.set_title(f"{name}\nRMSE {rmse:.3f}, {within:.0%} within factor 2", loc="left", fontsize=10)
+        ax.text(0.04, 0.96, f"{LABELS[name]}\nRMSE {rmse:.3f}\n{within:.0%} inside the band",
+                transform=ax.transAxes, va="top", ha="left", fontsize=8.5,
+                linespacing=1.5,
+                bbox=dict(boxstyle="round,pad=0.45", facecolor="white",
+                          edgecolor="#d8d6cf", linewidth=0.7))
+
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_xlim(lo, hi)
         ax.set_ylim(lo, hi)
         ax.set_aspect("equal")
-    for ax in axes[1]:
-        ax.set_xlabel("True cycles to failure")
-    for ax in axes[:, 0]:
-        ax.set_ylabel("Predicted cycles to failure")
-    axes[0, 0].legend(frameon=False, loc="upper left", fontsize=8)
-    fig.suptitle("Predicted vs true lifetime on the test set", x=0.02, ha="left")
-    save(fig, "4_pred_vs_true")
+        ax.xaxis.set_major_formatter(FuncFormatter(sci))
+        ax.yaxis.set_major_formatter(FuncFormatter(sci))
+        ax.set_xlabel("Measured cycles to failure")
+        ax.grid(color="#eceae4", linewidth=0.6, zorder=0)
+
+    axes[0].set_ylabel("Predicted cycles to failure")
+    # One shared explanation of the band, placed where it cannot cover points.
+    axes[1].text(0.97, 0.05, "shaded: within a factor of 2", transform=axes[1].transAxes,
+                 ha="right", va="bottom", fontsize=8, color="#5d7fae")
+    fig.subplots_adjust(wspace=0.08)
+    save(fig, "1_pred_vs_true")
 
 
-def plot_model_comparison(results, floor):
-    # Cross validation error per model, with the experimental scatter as a floor
-    fig, ax = plt.subplots(figsize=(7, 3.5))
-    results = results.sort_values("rmse_mean", ascending=False)
-    colors = [GREY if m == "basquin_baseline" else MAIN for m in results.index]
-    ax.barh(results.index, results["rmse_mean"], xerr=results["rmse_std"], color=colors, height=0.6,
-            error_kw={"ecolor": INK, "elinewidth": 1, "capsize": 3})
-    for i, v in enumerate(results["rmse_mean"]):
-        ax.text(v + results["rmse_std"].iloc[i] + 0.01, i, f"{v:.3f}", va="center", color=INK, fontsize=9)
-    ax.axvline(floor, color=INK, linestyle="--", linewidth=1,
-               label=f"Scatter between repeat tests ≈ {floor:.2f} (best possible)")
-    ax.legend(frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.22), fontsize=9)
-    ax.set_xlim(0, results["rmse_mean"].max() + 0.12)
-    ax.set_xlabel("RMSE, 5-fold grouped CV (log10 cycles, lower is better)")
-    ax.set_title("Model comparison (tuned settings, error bars = std over folds)", loc="left")
-    ax.grid(axis="y", visible=False)
-    save(fig, "5_model_comparison")
+# --------------------------------------------------------------------------
+# 2. Cross-validated error per model, every fold shown
+# --------------------------------------------------------------------------
+def plot_model_comparison(per_fold, floor):
+    """Dots and whiskers, not bars. With five folds the individual values are
+    the evidence; a bar from zero hides them and wastes the axis on a range no
+    model occupies."""
+    order = per_fold.groupby("model")["rmse"].mean().sort_values(ascending=False).index
+    fig, ax = plt.subplots(figsize=(7.2, 2.9))
+
+    ax.axvspan(0, floor, color="#f2e3e3", zorder=0)
+    ax.axvline(floor, color=ACCENT, linewidth=1.1, zorder=1)
+
+    rng = np.random.default_rng(0)
+    for i, name in enumerate(order):
+        vals = per_fold.loc[per_fold["model"] == name, "rmse"].to_numpy()
+        colour = GREY if name == "basquin_baseline" else MAIN
+        ax.scatter(vals, np.full_like(vals, i) + rng.uniform(-0.09, 0.09, len(vals)),
+                   s=18, color=colour, alpha=0.5, edgecolors="white",
+                   linewidths=0.4, zorder=2)
+        ax.plot([vals.min(), vals.max()], [i, i], color=colour, linewidth=1, zorder=2)
+        ax.scatter([vals.mean()], [i], s=70, marker="|", color=colour,
+                   linewidths=2.2, zorder=3)
+        ax.text(vals.max() + 0.012, i, f"{vals.mean():.3f}", va="center",
+                fontsize=8.5, color=INK)
+
+    ax.set_yticks(range(len(order)), [LABELS[m] for m in order])
+    ax.set_xlim(0.2, per_fold["rmse"].max() + 0.07)
+    ax.set_xlabel("RMSE per fold, 5-fold grouped CV (log$_{10}$ cycles)")
+    ax.text(floor - 0.008, -0.42, f"repeat-test scatter {floor:.2f}",
+            ha="right", va="center", fontsize=8, color=ACCENT)
+    ax.grid(axis="x", color="#eceae4", linewidth=0.6, zorder=0)
+    ax.set_axisbelow(True)
+    save(fig, "2_model_comparison")
+
+
+# --------------------------------------------------------------------------
+# 3. Permutation importance for the final model
+# --------------------------------------------------------------------------
+def plot_feature_importance(imp):
+    """Only columns whose effect exceeds their own scatter. The rest sit at
+    zero within noise and listing them suggests a ranking that is not there."""
+    keep = imp[imp["mean"] > 3 * imp["std"]].sort_values("mean")
+    keep = keep[keep["mean"] >= 0.01]
+    keep.index = [r"$\sigma_a$" if i == "sigma_a" else i for i in keep.index]
+    fig, ax = plt.subplots(figsize=(7.2, 0.42 * len(keep) + 1.1))
+
+    colours = [ACCENT if b else MAIN for b in keep["is_block"]]
+    ax.barh(range(len(keep)), keep["mean"], xerr=keep["std"], color=colours,
+            height=0.62, error_kw={"ecolor": INK, "elinewidth": 0.9, "capsize": 2})
+    for i, v in enumerate(keep["mean"]):
+        ax.text(v + keep["std"].iloc[i] + 0.012, i, f"{v:.2f}", va="center",
+                fontsize=8.5, color=INK)
+
+    ax.set_yticks(range(len(keep)), keep.index)
+    ax.set_xlim(0, keep["mean"].max() * 1.18)
+    ax.set_xlabel("RMSE increase when the column is shuffled (log$_{10}$ cycles)")
+    ax.text(0.99, 0.04, "red: three collinear strength columns, shuffled as one",
+            transform=ax.transAxes, ha="right", va="bottom", fontsize=8, color=ACCENT)
+    ax.grid(axis="x", color="#eceae4", linewidth=0.6)
+    ax.set_axisbelow(True)
+    save(fig, "3_feature_importance")
+
+
+# --------------------------------------------------------------------------
+# 4. Residuals against stress, with the censoring that explains them
+# --------------------------------------------------------------------------
+def plot_residuals(y_test, preds, best_name, sigma_test, runout_file):
+    """The censoring strip sits directly above the residuals, sharing the x
+    axis. A twin y axis was the other option, but its line crossed the point
+    cloud and had to be read against a scale on the far side of the figure."""
+    resid = preds[best_name] - y_test
+    bins = pd.qcut(sigma_test, 6)
+    trend = resid.groupby(bins, observed=True).mean()
+    centres = [iv.mid for iv in trend.index]
+    widths = [iv.right - iv.left for iv in trend.index]
+
+    # Same bin edges on the uncensored file, so the two panels line up.
+    edges = [iv.left for iv in trend.index] + [trend.index[-1].right]
+    full = pd.read_csv(runout_file).rename(columns={"σa": "sigma_a"})
+    share = full.groupby(pd.cut(full["sigma_a"], edges, include_lowest=True),
+                         observed=True)["runout"].mean()
+
+    fig, (top, ax) = plt.subplots(2, 1, figsize=(7.2, 4.4), sharex=True,
+                                  gridspec_kw={"height_ratios": [1, 4.2],
+                                               "hspace": 0.08})
+
+    top.bar(centres, share.values, width=[w * 0.92 for w in widths],
+            color="#cdc9c0", edgecolor="white", linewidth=0.8)
+    for c, v in zip(centres, share.values):
+        top.text(c, v + 0.03, f"{v:.0%}", ha="center", fontsize=7.5, color=INK)
+    top.set_ylim(0, 0.68)
+    top.set_ylabel("run-outs\nremoved", fontsize=8, linespacing=1.4)
+    top.set_yticks([])
+    top.spines["left"].set_visible(False)
+    top.grid(False)
+
+    ax.axhspan(-np.log10(2), np.log10(2), color=BAND, zorder=0)
+    ax.axhline(0, color=INK, linewidth=0.9, zorder=1)
+
+    inside = np.abs(resid) < np.log10(2)
+    ax.scatter(sigma_test[inside], resid[inside], s=13, color=MAIN, alpha=0.5,
+               edgecolors="white", linewidths=0.3, zorder=2)
+    ax.scatter(sigma_test[~inside], resid[~inside], s=13, color=GREY, alpha=0.55,
+               edgecolors="white", linewidths=0.3, zorder=2)
+    ax.plot(centres, trend.values, color=ACCENT, linewidth=1.9, marker="o",
+            markersize=5, zorder=4, label="Mean residual per stress bin")
+
+    ax.set_xlabel("Stress amplitude $\\sigma_a$ (MPa)")
+    ax.set_ylabel("log$_{10}$(predicted) \u2212 log$_{10}$(measured)")
+    ax.text(0.014, 0.97, "overpredicted", transform=ax.transAxes, va="top",
+            fontsize=8, color="#5d7fae")
+    ax.text(0.014, 0.03, "underpredicted", transform=ax.transAxes, va="bottom",
+            fontsize=8, color="#5d7fae")
+    ax.text(0.986, 0.97, "shaded: within a factor of 2", transform=ax.transAxes,
+            ha="right", va="top", fontsize=8, color="#5d7fae")
+    ax.legend(frameon=False, loc="lower right", fontsize=8)
+    ax.grid(color="#eceae4", linewidth=0.6, zorder=0)
+    ax.set_axisbelow(True)
+
+    save(fig, "4_residuals_vs_stress")
+    return pd.DataFrame({"mean_residual": trend.values,
+                         "runout_share": share.values}, index=trend.index)
 
 
 if __name__ == "__main__":
-    df = pd.read_csv("Data/train.csv").rename(columns={"σa": "sigma_a"})
     X, y, groups, folds = load_clean()
     X_test, y_test, _, _ = load_clean("Data/test.csv")
     X_test = X_test[X.columns]
 
-    # Same steps as evaluate.py, tune on train, pick lowest CV error, predict test once
     tuned, summary = tune_all(X, y, folds)
     best_name = summary["rmse_mean"].idxmin()
+    final_model = tuned[best_name]
 
-    # Test predictions for every model. 
     preds = {"basquin_baseline": basquin_baseline(X, y, X_test)}
     for name, model in tuned.items():
         preds[name] = model.predict(X_test)
 
-    basquin_cv = cross_validate_folds(basquin_baseline, X, y, folds)
-    results = summary[["rmse_mean", "rmse_std"]].copy()
-    results.loc["basquin_baseline"] = [basquin_cv["rmse"].mean(), basquin_cv["rmse"].std()]
+    # Per-fold CV error for every model, tuned settings, so figure 2 can show
+    # the individual folds rather than a mean and a bar.
+    per_fold = []
+    for name, model in {"basquin_baseline": None, **tuned}.items():
+        fp = basquin_baseline if model is None else sklearn_fit_predict(model)
+        res = cross_validate_folds(fp, X, y, folds)
+        res["model"] = name
+        per_fold.append(res)
+    per_fold = pd.concat(per_fold, ignore_index=True)
 
-    floor = replicate_scatter(df)
-    print(f"Scatter between repeat tests: {floor:.3f}")
+    train = pd.read_csv("Data/train.csv").rename(columns={"σa": "sigma_a"})
+    floor = replicate_scatter(train)
+    print(f"Repeat-test scatter: {floor:.3f}")
+    print(f"Final model: {best_name}\n")
 
-    # Data exploration
-    raw = pd.read_excel("Dataset/NIMS_FATIGUE.xlsx")
-    raw.columns = raw.columns.str.strip()
-    plot_target_distribution(raw)
-    plot_sn_curves(df)
-    plot_correlation(df)
-
-    # Results
     plot_pred_vs_true(y_test, preds, best_name)
-    plot_model_comparison(results, floor)
+    plot_model_comparison(per_fold, floor)
+    plot_feature_importance(feature_importance(final_model, X, y, folds))
+    table = plot_residuals(y_test, preds, best_name, X_test["sigma_a"],
+                           "Data/test_with_runouts.csv")
 
+    print("\nResidual bias against censoring, per stress bin")
+    print(table.round(3).to_string())
+    

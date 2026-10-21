@@ -17,6 +17,9 @@ from sklearn.model_selection import GroupKFold, GridSearchCV, PredefinedSplit
 from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.base import clone
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 
 pd.set_option("display.width", 200) # Show all columns when printing tables
@@ -27,8 +30,16 @@ pd.set_option("display.max_columns", None)
 DROP_FROM_X = ["log10_Nf", "group", "fold", "runout"]
 
 
+COLLINEAR_BLOCKS = {
+    "strength (proof/tensile/vickers)":
+        ["0.2% proof stress", "Tensile strength", "Vickers hardness"],
+}
 
-def load_clean(path="Data/train.csv"):
+
+TRAIN_PATH = "Data/train.csv"
+
+# Train with: "Data/train.csv" Test with: "Data/train_with_runouts.csv" 
+def load_clean(path=TRAIN_PATH):
     # Load Data 1's cleaned split
     df = pd.read_csv(path)
     df = df.rename(columns={"σa": "sigma_a"}) #rename to sigma_a
@@ -108,6 +119,37 @@ def cross_validate_folds(fit_predict, X, y, folds):
     return pd.DataFrame(results)
 
 
+def feature_importance(model, X, y, folds, n_repeats=10, seed=0):
+    blocked = [c for cols in COLLINEAR_BLOCKS.values() for c in cols]
+    items = {c: [c] for c in X.columns if c not in blocked}
+    items.update(COLLINEAR_BLOCKS)
+ 
+    rng = np.random.default_rng(seed)
+    scores = {name: [] for name in items}
+ 
+    for f in sorted(folds.unique()):
+        tr, te = folds != f, folds == f
+        fitted = clone(model).fit(X[tr], y[tr])  # clone so the caller's model is untouched
+        X_val = X[te].reset_index(drop=True)
+        y_val = y[te].reset_index(drop=True)
+        base = np.sqrt(np.mean((fitted.predict(X_val) - y_val) ** 2))
+ 
+        for name, cols in items.items():
+            for _ in range(n_repeats):
+                X_perm = X_val.copy()
+                order = rng.permutation(len(X_perm))
+                X_perm[cols] = X_perm[cols].iloc[order].values
+                rmse = np.sqrt(np.mean((fitted.predict(X_perm) - y_val) ** 2))
+                scores[name].append(rmse - base)
+ 
+    imp = pd.DataFrame({
+        "mean": {k: np.mean(v) for k, v in scores.items()},
+        "std": {k: np.std(v) for k, v in scores.items()},
+    }).sort_values("mean", ascending=False)
+    imp["is_block"] = [k in COLLINEAR_BLOCKS for k in imp.index]
+    return imp
+
+
 
 
 MODELS = {
@@ -169,10 +211,13 @@ def tune_all(X, y, folds):
         search = GridSearchCV(model, grid, cv=cv, scoring="neg_root_mean_squared_error", n_jobs=-1)
         search.fit(X, y) # After the search, the best setting is retrained on all of train
         best = search.best_index_
+        scores = -search.cv_results_["mean_test_score"]
         rows.append({
             "model": name,
             "rmse_mean": -search.best_score_, # sklearn gives negative RMSE so higher is better, flip it back
             "rmse_std": search.cv_results_["std_test_score"][best],
+            "grid_worst": scores.max(),      # worst setting in the grid
+            "n_combos": len(scores),         # how many were tried
             "best_params": search.best_params_,
         })
         tuned[name] = search.best_estimator_
@@ -180,45 +225,59 @@ def tune_all(X, y, folds):
 
 
 if __name__ == "__main__":
+    
     self_test()
 
     X, y, groups, folds = load_clean()
- 
-    print("rows:", len(X), " features:", len(X.columns), " groups:", groups.nunique())
-    print()
-    print("Default settings, 5-fold grouped CV")
-    print(run_all(X, y, groups, folds).round(3))
+    print(f"Training data: {TRAIN_PATH}")
+    print(f"{len(X)} rows, {X.shape[1]} features, {groups.nunique()} material groups\n")
 
-    print()
-    print("Tuned settings, 5-fold grouped CV")
+    # Cross validation on train, library defaults
+    default = run_all(X, y, groups, folds)
+    print("5-fold grouped CV, default settings")
+    print(default.round(3), "\n")
+
+    # Tuning: compare the gain against the spread between folds.
+    # If gain < fold_std the improvement is smaller than the noise.
     tuned, summary = tune_all(X, y, folds)
-    print(summary.round(3))
+    gain = pd.DataFrame({
+        "default_rmse": default[("rmse", "mean")],
+        "tuned_rmse": summary["rmse_mean"],
+        "gain": default[("rmse", "mean")] - summary["rmse_mean"],
+        "fold_std": summary["rmse_std"],
+        "grid_worst": summary["grid_worst"],
+    }).dropna()
+    print("Tuning: gain vs spread between folds")
+    print(gain.round(3), "\n")
+    print("Best settings")
+    print(summary["best_params"].to_string(), "\n")
 
-    # Pick the model with the lowest Cross validation error. 
     best_name = summary["rmse_mean"].idxmin()
     final_model = tuned[best_name]
+    
 
-    # Unseen data, the groups in test.csv were never used for training
+    # What the chosen model actually relies on
+    print(f"Feature importance for {best_name} (RMSE increase when shuffled)")
+    print(feature_importance(final_model, X, y, folds).round(3).head(8), "\n")
+
+    # Test set. Touched once, at the end. Every model, so the table is complete.
     X_test, y_test, _, _ = load_clean("Data/test.csv")
     X_test = X_test[X.columns]
-    y_pred = final_model.predict(X_test)
+    preds = {"basquin_baseline": basquin_baseline(X, y, X_test)}
+    for name, model in tuned.items():
+        preds[name] = model.predict(X_test)
+    test_results = pd.DataFrame({n: compute_metrics(y_test, p) for n, p in preds.items()}).T
 
-    # Basquin baseline trained on all of train
-    test_results = pd.DataFrame({
-        "basquin_baseline": compute_metrics(y_test, basquin_baseline(X, y, X_test)),
-        best_name: compute_metrics(y_test, y_pred),
-    }).T
-    print()
     print(f"Test set ({len(X_test)} rows, {X_test.shape[1]} features), final model: {best_name}")
-    print(test_results.round(3))
+    print(test_results.round(3), "\n")
 
-    # A few example predictions, back in number of cycles instead of log10
+    # Sample predictions, converted back from log10 to actual cycles
     sample = pd.DataFrame({
         "sigma_a": X_test["sigma_a"],
         "true_Nf": 10 ** y_test,
-        "pred_Nf": 10 ** y_pred,
-        "ratio": 10 ** (y_pred - y_test), # 1.0 is perfect, 2.0 means predicted twice the real lifetime
+        "pred_Nf": 10 ** preds[best_name],
+        "ratio": 10 ** (preds[best_name] - y_test),  # 1.0 perfect, 2.0 = predicted twice the real life
     }).sample(10, random_state=0)
-    print()
     print("Sample predictions on the test set")
-    print(sample.round({"true_Nf": 0, "pred_Nf": 0, "ratio": 2}).to_string())
+    print(sample.round({"sigma_a": 0, "true_Nf": 0, "pred_Nf": 0, "ratio": 2}).to_string())
+
