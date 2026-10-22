@@ -18,20 +18,24 @@ df = pd.read_excel("Dataset/NIMS_FATIGUE.xlsx")
 df.columns = df.columns.str.strip()
 steps.append(("loaded", len(df)))
 
+# only drop duplicates among failed tests, identical run-outs are different specimens
 is_duplicate = df.duplicated() & (df["Nf"] < RUNOUT_LIMIT)
 df = df[~is_duplicate].reset_index(drop=True)
 steps.append(("duplicates removed (failed tests only)", len(df)))
 
+# proof stress above tensile strength can't be right
 impossible = df["0.2% proof stress"] > df["Tensile strength"]
 df = df[~impossible].reset_index(drop=True)
 steps.append(("proof stress > tensile strength removed", len(df)))
 
 df = df.drop(columns=DROP_COLS)
 
+# one group = one material state, rows in a group are near copies
 state_cols = [c for c in df.columns if c not in ("Nf", "σa", "Type of test")]
 df["group"] = df.groupby(state_cols, dropna=False).ngroup()
 steps.append((f"groups made ({df['group'].nunique()} material states)", len(df)))
 
+# log10 because Nf is very skewed
 df["runout"] = (df["Nf"] >= RUNOUT_LIMIT).astype(int)
 df["log10_Nf"] = np.log10(df["Nf"])
 df = df.drop(columns=["Nf"])
@@ -39,6 +43,7 @@ df = df.drop(columns=["Nf"])
 df["Type of test"] = (df["Type of test"] == "Uniaxial loading").astype(int)
 df = pd.get_dummies(df, columns=["Testing Material"], prefix="mat", dtype=int)
 
+# split on groups, not rows, otherwise train and test leak
 splitter = GroupShuffleSplit(n_splits=1, test_size=TEST_SIZE, random_state=SEED)
 train_idx, test_idx = next(splitter.split(df, groups=df["group"]))
 train = df.iloc[train_idx].copy()
@@ -46,12 +51,14 @@ test = df.iloc[test_idx].copy()
 steps.append(("split: train rows", len(train)))
 steps.append(("split: test rows", len(test)))
 
+# run-outs only give a lower bound for Nf
 if not INCLUDE_RUNOUTS:
     train = train[train["runout"] == 0].copy()
     test = test[test["runout"] == 0].copy()
 steps.append(("after run-out choice: train rows", len(train)))
 steps.append(("after run-out choice: test rows", len(test)))
 
+# folds also keep groups together, spread over steel grades
 mat_cols = [c for c in train.columns if c.startswith("mat_")]
 grade = train[mat_cols].idxmax(axis=1)
 cv = StratifiedGroupKFold(n_splits=N_FOLDS, shuffle=True, random_state=SEED)
@@ -60,6 +67,7 @@ for k, (_, val_idx) in enumerate(cv.split(train, grade, groups=train["group"])):
     train.iloc[val_idx, train.columns.get_loc("fold")] = k
 test["fold"] = -1
 
+# fill missing temps with the train median, keep a flag
 for col in TEMP_COLS:
     train[col + " missing"] = train[col].isna().astype(int)
     test[col + " missing"] = test[col].isna().astype(int)
@@ -67,12 +75,14 @@ for col in TEMP_COLS:
     train[col] = train[col].fillna(median)
     test[col] = test[col].fillna(median)
 
+# these two flags turned out identical
 same_flag = "Tempering temp missing"
 assert (train[same_flag] == train["Quenching temp missing"]).all()
 assert (test[same_flag] == test["Quenching temp missing"]).all()
 train = train.drop(columns=same_flag)
 test = test.drop(columns=same_flag)
 
+# sanity checks
 assert train.isna().sum().sum() == 0 and test.isna().sum().sum() == 0, "missing values left"
 assert not set(train["group"]) & set(test["group"]), "a group is in both train and test"
 assert train.select_dtypes(exclude="number").empty, "non-numeric column left"
