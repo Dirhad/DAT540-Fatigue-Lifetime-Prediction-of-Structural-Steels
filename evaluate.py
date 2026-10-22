@@ -1,13 +1,3 @@
-# How many bending cycles (fatigue) before the metal fails
-# Nf is the number we count up to (Number of cycles until failure)
-# N for number (of cycles), f for failure, σa is how hard you bend it (MPa)
-# Sigma is stress, a is amplitude
-
-# Important terms:
-# RMSE - typical miss in log units
-# MAE - average miss without squaring
-# R^2 - share of the variation the model explains (1 = perfect)
-
 
 import numpy as np
 import pandas as pd
@@ -20,10 +10,23 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.base import clone
 import warnings
 
+#---------------------------------------------------------------------------------
+# How many bending cycles (fatigue) before the metal fails
+# Nf is the number we count up to (Number of cycles until failure)
+# N for number (of cycles), f for failure, σa is how hard you bend it (MPa)
+# Sigma is stress, a is amplitude
+
+# Important terms:
+# RMSE - typical miss in log units
+# MAE - average miss without squaring
+# R^2 - share of the variation the model explains (1 = perfect)
+#---------------------------------------------------------------------------------
+
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
-
-pd.set_option("display.width", 200) # Show all columns when printing tables
+# Show all columns when printing tables
+pd.set_option("display.width", 200) 
 pd.set_option("display.max_colwidth", None)
 pd.set_option("display.max_columns", None)
 
@@ -39,11 +42,12 @@ COLLINEAR_BLOCKS = {
 
 TRAIN_PATH = "Data/train.csv"
 
-# Train with: "Data/train.csv" Test with: "Data/train_with_runouts.csv" 
+# Train with: "Data/train.csv" 
+# Train with runouts (run outs have censored Nf, not a real failure life): "Data/train_with_runouts.csv" 
 def load_clean(path=TRAIN_PATH ):
     # Load Data 1's cleaned split
     df = pd.read_csv(path)
-    df = df.rename(columns={"σa": "sigma_a"}) #rename to sigma_a
+    df = df.rename(columns={"σa": "sigma_a"}) # rename to sigma_a
     X = df.drop(columns=[c for c in DROP_FROM_X if c in df.columns]) # Removes the columns from the table
     y = df["log10_Nf"] # y is what its supposed to guess
     groups = df["group"] 
@@ -75,7 +79,8 @@ def self_test():
 
 
 def basquin_baseline(X_train, y_train, X_test):
-    # Straight line between log spread and log lifetime - Basquins Law
+    # Straight line between log stress and log lifetime - Basquins Law
+    # Uses only sigma_a, no material information
     log_sigma_train = np.log10(X_train[["sigma_a"]]) 
     log_sigma_test = np.log10(X_test[["sigma_a"]])
     model = LinearRegression().fit(log_sigma_train, y_train)
@@ -89,20 +94,25 @@ def sklearn_fit_predict(model):
     return inner
 
 def cross_validate_model(fit_predict, X, y, groups, n_splits = 5):
+    # Backup Cross validation, only used when there is no "fold" column
+    # GroupKFold makes its own 5 splits so no material group is in both train and test
+
     gkf = GroupKFold(n_splits=n_splits)
     results = []
     for fold, (train_idx, test_idx) in enumerate(gkf.split(X, y, groups)):
         X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
         y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
-        y_pred = fit_predict(X_tr, y_tr, X_te)
-        m = compute_metrics(y_te, y_pred)
+        y_pred = fit_predict(X_tr, y_tr, X_te) # Train on four parts, guess fifth
+        m = compute_metrics(y_te, y_pred) # Score the guess against the hidden answers
         m["fold"] = fold
-        m["n_test"] = len(test_idx)
+        m["n_test"] = len(test_idx) # How many rows were in this test part
         results.append(m)
     return pd.DataFrame(results)
 
 def cross_validate_folds(fit_predict, X, y, folds):
     # Five rounds. For every round one bit is test and the 4 others are training bits.
+    # Uses the fixed folds from data_prep.py
+
     results = []
     for f in sorted(folds.unique()):
         # folds == f gives a list with True or False, one per row
@@ -121,16 +131,22 @@ def cross_validate_folds(fit_predict, X, y, folds):
 
 
 def feature_importance(model, X, y, folds, n_repeats=10, seed=0):
+    # Permutation importance, shuffle one column so it carries no information 
+    # and measure how much worse the RMSE gets. 
+    # Big increase -> the model relies on the column. 
+
+    # Every column is its own item, except the strength columns which form one item together
     blocked = [c for cols in COLLINEAR_BLOCKS.values() for c in cols]
     items = {c: [c] for c in X.columns if c not in blocked}
     items.update(COLLINEAR_BLOCKS)
- 
+
+    # Fixed seed, so the shuffles are the same every run
     rng = np.random.default_rng(seed)
     scores = {name: [] for name in items}
  
     for f in sorted(folds.unique()):
         tr, te = folds != f, folds == f
-        fitted = clone(model).fit(X[tr], y[tr])  # clone so the caller's model is untouched
+        fitted = clone(model).fit(X[tr], y[tr]) 
         X_val = X[te].reset_index(drop=True)
         y_val = y[te].reset_index(drop=True)
         base = np.sqrt(np.mean((fitted.predict(X_val) - y_val) ** 2))
@@ -142,7 +158,8 @@ def feature_importance(model, X, y, folds, n_repeats=10, seed=0):
                 X_perm[cols] = X_perm[cols].iloc[order].values
                 rmse = np.sqrt(np.mean((fitted.predict(X_perm) - y_val) ** 2))
                 scores[name].append(rmse - base)
- 
+
+    # Average and spread over all folds and repeats, largest first
     imp = pd.DataFrame({
         "mean": {k: np.mean(v) for k, v in scores.items()},
         "std": {k: np.std(v) for k, v in scores.items()},
@@ -162,6 +179,7 @@ MODELS = {
 
 
 def run_all(X, y, groups, folds=None):
+    # Cross-validate every model in MODELS and collect the results in one table
     all_results = []
     for name, fit_predict in MODELS.items():
         if folds is not None:
@@ -227,7 +245,7 @@ def tune_all(X, y, folds):
 
 if __name__ == "__main__":
     
-    self_test()
+    self_test() # Stop if the metrics are broken
 
     X, y, groups, folds = load_clean()
     print(f"Training data: {TRAIN_PATH}")
