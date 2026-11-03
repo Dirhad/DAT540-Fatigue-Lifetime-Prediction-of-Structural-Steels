@@ -3,7 +3,7 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
+from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 
 from evaluate import load_clean, tune_all, feature_importance, basquin_baseline
 
@@ -78,6 +78,36 @@ def basquin_line(stress, log_nf):
     # Straight line representation of a material's stress-life 
     b, a = np.polyfit(np.log10(stress), log_nf, 1)
     return lambda s: a + b * np.log10(s)
+
+
+def fig0_target_distribution(df):
+    # Figure 0: Distribution of the target before and after the log transform
+    # Uses all cleaned tests, run-outs included, so the run-out limits are visible
+
+    failed = df[df["runout"] == 0]
+    fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.8))
+
+    # Raw cycles of the failed tests, strongly right-skewed
+    axes[0].hist(10 ** failed["log10_Nf"] / 1e6, bins=40, color=BLUE, edgecolor="white", linewidth=0.4)
+    axes[0].set(xlabel="Cycles to failure $N_f$ (millions)", ylabel="Number of tests")
+    axes[0].set_title("Failed tests, raw scale", fontsize=9, loc="left")
+
+    # log10 scale, failed and run-outs stacked
+    bins = np.linspace(df["log10_Nf"].min(), df["log10_Nf"].max(), 50)
+    axes[1].hist([failed["log10_Nf"], df.loc[df["runout"] == 1, "log10_Nf"]], bins=bins, stacked=True,
+                 color=[BLUE, GREY], edgecolor="white", linewidth=0.4, label=["failed", "run-out"])
+    axes[1].axvline(7, color=RED, linewidth=1.0, linestyle="--")
+    axes[1].text(6.95, axes[1].get_ylim()[1] * 0.92, "$10^{7}$ limit", color=RED, fontsize=8, ha="right")
+    axes[1].set(xlabel=r"$\log_{10} N_f$")
+    axes[1].set_title("All tests, log scale", fontsize=9, loc="left")
+    axes[1].legend(frameon=False, loc="upper right", bbox_to_anchor=(1.0, 0.85))
+
+    for ax in axes:
+        ax.grid(axis="y", color="#eceae4", linewidth=0.6)
+        ax.set_axisbelow(True)
+    fig.tight_layout()
+    save(fig, "0_target_distribution")
+    return failed["log10_Nf"].pipe(lambda s: (s.skew(), (10 ** s).skew()))
 
 
 def fig1_predicted_vs_measured(y_test, preds, best_name):
@@ -184,41 +214,40 @@ def fig3_sn_curves(df, n_drawn=6):
     candidates.sort(key=lambda c: c[0])  # spread the picks over strength
     pick = np.unique(np.linspace(0, len(candidates) - 1, min(n_drawn, len(candidates))).round().astype(int))
     shown = [candidates[i] for i in pick]
-    colors = plt.cm.Blues(np.linspace(0.5, 0.95, len(shown)))
+    # Dark end of viridis only, the pale yellow-green is hard to see on white
+    colors = plt.cm.viridis(np.linspace(0.0, 0.72, len(shown)))
 
+    # Log-log axes, so each Basquin fit is a straight line as in equation (1)
     fig, ax = plt.subplots(figsize=(7.2, 4.0))
-    ends, rows = [], []
+    rows = []
     for (uts, fit), color in zip(shown, colors):
         line = basquin_line(fit["sigma_a"], fit["log10_Nf"])
-        s = np.linspace(fit["sigma_a"].min(), fit["sigma_a"].max(), 100)
+        s = np.geomspace(fit["sigma_a"].min(), fit["sigma_a"].max(), 100)
 
-        ax.scatter(10 ** fit["log10_Nf"], fit["sigma_a"], s=10, color=color, alpha=0.35,
-                   edgecolors="none", zorder=2)
-        ax.plot(10 ** line(s), s, color=color, linewidth=1.8, zorder=3)
+        ax.scatter(10 ** fit["log10_Nf"], fit["sigma_a"], s=16, color=color, alpha=0.8,
+                   edgecolors="white", linewidths=0.4, zorder=3)
+        ax.plot(10 ** line(s), s, color=color, linewidth=1.8, zorder=2, label=f"UTS {uts:.0f} MPa")
 
-        ends.append([10 ** line(s[0]), s[0], f"UTS {uts:.0f} MPa", color])
         b = 1 / np.polyfit(np.log10(fit["sigma_a"]), fit["log10_Nf"], 1)[0]
         rows.append({"UTS (MPa)": uts, "n": len(fit), "b": round(b, 3)})
 
-
-    lives = 10 ** in_mode["log10_Nf"]
-    top = in_mode["sigma_a"].max() * 1.1
-    gap = 0.055 * top
-    label_x = lives.max() * 2.5
-    ends.sort(key=lambda e: e[1])
-    label_y = [e[1] for e in ends]
-    for i in range(1, len(label_y)):
-        label_y[i] = max(label_y[i], label_y[i - 1] + gap)
-    for (x, y_end, text, color), y_label in zip(ends, label_y):
-        ax.plot([x * 1.08, label_x / 1.1], [y_end, y_label], color=color, linewidth=0.6, alpha=0.7)
-        ax.text(label_x, y_label, text, va="center", fontsize=8, color=color)
-
-    ax.set(xscale="log", xlim=(lives.min() / 1.5, label_x * 6), ylim=(0, top),
+    ax.set(xscale="log", yscale="log",
            xlabel="Cycles to failure $N_f$", ylabel=r"Stress amplitude $\sigma_a$ (MPa)")
     ax.xaxis.set_major_formatter(FuncFormatter(decade))
-    ax.text(0.98, 0.97, f"loading mode: {mode_name}\nBasquin fit, drawn over tested stresses only",
-            transform=ax.transAxes, ha="right", va="top", fontsize=8, color=GREY)
-    ax.grid(color="#eceae4", linewidth=0.6)
+    ax.yaxis.set_major_locator(LogLocator(base=10, subs=(1, 2, 2.5, 3, 4, 5, 6, 8)))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}"))
+    ax.yaxis.set_minor_formatter(NullFormatter())
+
+    # Legend above the plot so it hides no data, strongest state first like the lines
+    handles, labels = ax.get_legend_handles_labels()
+    handles, labels = handles[::-1], labels[::-1]
+    # Matplotlib fills legend columns first, reorder so each row reads strongest to weakest
+    n_rows = int(np.ceil(len(handles) / 3))
+    order = [(p % n_rows) * 3 + p // n_rows for p in range(len(handles))]
+    ax.legend([handles[i] for i in order], [labels[i] for i in order],
+              loc="lower center", bbox_to_anchor=(0.5, 1.0),
+              ncol=3, frameon=False, fontsize=8.5, handlelength=2.2, columnspacing=1.8)
+    ax.grid(which="both", color="#eceae4", linewidth=0.5)
     ax.set_axisbelow(True)
     save(fig, "3_sn_curves")
 
@@ -251,6 +280,8 @@ def main():
 
     # Draw and save the three figures
     print("\nFigures")
+    all_tests = pd.concat([pd.read_csv("Data/train_with_runouts.csv"), pd.read_csv("Data/test_with_runouts.csv")])
+    fig0_target_distribution(all_tests)
     fig1_predicted_vs_measured(y_test, preds, best_name)
     kept = fig2_feature_importance(importance)
     within_state, drawn = fig3_sn_curves(train)
