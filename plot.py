@@ -11,13 +11,12 @@ OUT = "figures"
 TRAIN = "Data/train.csv"
 TEST = "Data/test.csv"
 
-BLUE = "#2a78d6"     # models
-GREY = "#8c8a84"     # baseline, reference material
-RED = "#b03030"      # the one thing the reader should notice
-BAND = "#dfe8f5"     # factor-two band
+BLUE = "#2a78d6"
+GREY = "#8c8a84"
+RED = "#b03030"
+BAND = "#dfe8f5"
 INK = "#3f3e3c"
 
-# Column names as they should read in a figure, not as they appear in the CSV.
 PRETTY = {
     "sigma_a": r"$\sigma_a$",
     "Type of test": "Loading mode",
@@ -55,18 +54,14 @@ def save(fig, name):
 
 
 def decade(v, _):
-    # Label for Axis to show 10^n instead of 1e+06
     return f"$10^{{{int(np.log10(v))}}}$"
 
 
 def pretty(name):
-    # Look up the display name, or keep the column name if it has none
     return PRETTY.get(name, name)
 
 
 def repeat_test_scatter(df):
-    # Check for how much lifetimes differ when the same test is repeated
-    # (same material, same stress, same loading mode)
 
     cell = df.groupby(["group", "sigma_a", "Type of test"])["log10_Nf"]
     residual = (df["log10_Nf"] - cell.transform("mean"))[cell.transform("size") > 1]
@@ -75,24 +70,19 @@ def repeat_test_scatter(df):
 
 
 def basquin_line(stress, log_nf):
-    # Straight line representation of a material's stress-life 
     b, a = np.polyfit(np.log10(stress), log_nf, 1)
     return lambda s: a + b * np.log10(s)
 
 
 def fig0_target_distribution(df):
-    # Figure 0: Distribution of the target before and after the log transform
-    # Uses all cleaned tests, run-outs included, so the run-out limits are visible
 
     failed = df[df["runout"] == 0]
     fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.8))
 
-    # Raw cycles of the failed tests, strongly right-skewed
     axes[0].hist(10 ** failed["log10_Nf"] / 1e6, bins=40, color=BLUE, edgecolor="white", linewidth=0.4)
     axes[0].set(xlabel="Cycles to failure $N_f$ (millions)", ylabel="Number of tests")
     axes[0].set_title("Failed tests, raw scale", fontsize=9, loc="left")
 
-    # log10 scale, failed and run-outs stacked
     bins = np.linspace(df["log10_Nf"].min(), df["log10_Nf"].max(), 50)
     axes[1].hist([failed["log10_Nf"], df.loc[df["runout"] == 1, "log10_Nf"]], bins=bins, stacked=True,
                  color=[BLUE, GREY], edgecolor="white", linewidth=0.4, label=["failed", "run-out"])
@@ -111,9 +101,6 @@ def fig0_target_distribution(df):
 
 
 def fig1_predicted_vs_measured(y_test, preds, best_name):
-    # Figure 1: Predicted vs measured life on the test.
-    # Baseline (left) and best model (right)
-    # A perfect model puts every point on the diagonal line
 
     shown = ["basquin_baseline", best_name]
     fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.8), sharex=True, sharey=True)
@@ -154,10 +141,8 @@ def fig1_predicted_vs_measured(y_test, preds, best_name):
 
 
 def fig2_feature_importance(imp, top=6):
-    # Figure 2: Permutation importance for the best model
-    # X axis is how much worse the RMSE gets when the column is shuffled
 
-    keep = imp.sort_values("mean").tail(top) # The top 6
+    keep = imp.sort_values("mean").tail(top)
     fig, ax = plt.subplots(figsize=(7.2, 0.45 * len(keep) + 1.1))
 
     ax.barh(range(len(keep)), keep["mean"], xerr=keep["std"], height=0.62,
@@ -178,9 +163,7 @@ def fig2_feature_importance(imp, top=6):
 
 
 def fig3_sn_curves(df, n_drawn=6):
-    # Figure 3: S-N Curves (stress vs cycles) for a few material states + Basquin error numbers
 
-    # Basquin line per material state and loading mode, fitted on its own data
     residuals, n_states = [], 0
     for _, fit in df.groupby(["group", "Type of test"]):
         if len(fit) < 3 or fit["sigma_a"].nunique() < 2:
@@ -190,14 +173,11 @@ def fig3_sn_curves(df, n_drawn=6):
         n_states += 1
     residuals = pd.concat(residuals)
 
-    # One line through all data using stress only
     raw = basquin_line(df["sigma_a"], df["log10_Nf"])
 
-    # One line through all data using stress divided by tensile strength
     ratio = df["sigma_a"] / df["Tensile strength"]
     norm = basquin_line(ratio, df["log10_Nf"])
 
-    # RMSE of each of the three
     within_state = {
         "per_state": np.sqrt((residuals ** 2).sum() / (len(residuals) - 2 * n_states)),
         "n_states": n_states,
@@ -207,17 +187,15 @@ def fig3_sn_curves(df, n_drawn=6):
 
 
     mode = df["Type of test"].value_counts().idxmax()
-    mode_name = "Uniaxial loading" if mode == 1 else "Rotating bending"  # data_prep: 1 = uniaxial
+    mode_name = "Uniaxial loading" if mode == 1 else "Rotating bending"
     in_mode = df[df["Type of test"] == mode]
     candidates = [(cell["Tensile strength"].iloc[0], cell) for _, cell in in_mode.groupby("group")
                   if len(cell) >= 5 and cell["sigma_a"].nunique() >= 3]
-    candidates.sort(key=lambda c: c[0])  # spread the picks over strength
+    candidates.sort(key=lambda c: c[0])
     pick = np.unique(np.linspace(0, len(candidates) - 1, min(n_drawn, len(candidates))).round().astype(int))
     shown = [candidates[i] for i in pick]
-    # Dark end of viridis only, the pale yellow-green is hard to see on white
     colors = plt.cm.viridis(np.linspace(0.0, 0.72, len(shown)))
 
-    # Log-log axes, so each Basquin fit is a straight line as in equation (1)
     fig, ax = plt.subplots(figsize=(7.2, 4.0))
     rows = []
     for (uts, fit), color in zip(shown, colors):
@@ -238,10 +216,8 @@ def fig3_sn_curves(df, n_drawn=6):
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}"))
     ax.yaxis.set_minor_formatter(NullFormatter())
 
-    # Legend above the plot so it hides no data, strongest state first like the lines
     handles, labels = ax.get_legend_handles_labels()
     handles, labels = handles[::-1], labels[::-1]
-    # Matplotlib fills legend columns first, reorder so each row reads strongest to weakest
     n_rows = int(np.ceil(len(handles) / 3))
     order = [(p % n_rows) * 3 + p // n_rows for p in range(len(handles))]
     ax.legend([handles[i] for i in order], [labels[i] for i in order],
@@ -257,12 +233,10 @@ def fig3_sn_curves(df, n_drawn=6):
 
 
 def main():
-    # Load the same data as evaluate.py
     X, y, _, folds = load_clean(TRAIN)
     X_test, y_test, _, _ = load_clean(TEST)
-    X_test = X_test[X.columns]          # same column order as training
+    X_test = X_test[X.columns]
 
-    # Train table (with group and log10_Nf) needed for noise floor and figure 3
     train = pd.read_csv(TRAIN).rename(columns={"σa": "sigma_a"})
 
     print("Tuning (this is the slow part)...")
@@ -270,15 +244,12 @@ def main():
     best_name = summary["rmse_mean"].idxmin()
     final_model = tuned[best_name]
 
-    # Only the two models figure 1 shows
     preds = {"basquin_baseline": basquin_baseline(X, y, X_test),
              best_name: final_model.predict(X_test)}
 
-    floor = repeat_test_scatter(train) # Noise floor from repeated tests
-    # 30 repeats
+    floor = repeat_test_scatter(train)
     importance = feature_importance(final_model, X, y, folds, n_repeats=30)
 
-    # Draw and save the three figures
     print("\nFigures")
     all_tests = pd.concat([pd.read_csv("Data/train_with_runouts.csv"), pd.read_csv("Data/test_with_runouts.csv")])
     fig0_target_distribution(all_tests)
@@ -286,7 +257,6 @@ def main():
     kept = fig2_feature_importance(importance)
     within_state, drawn = fig3_sn_curves(train)
 
-    # Everything a caption or a sentence in the report needs, in one place.
     cv_best = summary.loc[best_name, "rmse_mean"]
     print(f"\nFinal model: {best_name}")
     print(f"Repeat-test scatter (noise floor): {floor:.3f}")

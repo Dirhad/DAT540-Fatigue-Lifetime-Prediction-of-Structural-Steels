@@ -5,23 +5,14 @@ from sklearn.model_selection import GroupShuffleSplit, ShuffleSplit
 
 from evaluate import load_clean, compute_metrics
 
-#---------------------------------------------------------------------------------
-# How much does a random split by row flatter the score?
-# Same model and settings as the final model in evaluate.py, same failed tests,
-# only the way the data is split changes.
-# Random split: tests from one material state can end up in both train and test.
-# Group split: every material state is on one side only, as in the main analysis.
-#---------------------------------------------------------------------------------
 
 N_SEEDS = 10
 TEST_SIZE = 0.2
 
-# Best settings for gradient boosting from the grid search in evaluate.py
 BEST = {"learning_rate": 0.1, "max_leaf_nodes": 15, "min_samples_leaf": 10}
 
 
 def all_failed_tests():
-    # Train and test from data_prep.py put back together (run-outs already removed)
     X_tr, y_tr, g_tr, _ = load_clean("Data/train.csv")
     X_te, y_te, g_te, _ = load_clean("Data/test.csv")
     X = pd.concat([X_tr, X_te[X_tr.columns]], ignore_index=True)
@@ -31,7 +22,6 @@ def all_failed_tests():
 
 
 def score_split(splitter, X, y, groups):
-    # Fit on the train part, score once on the test part, for every seed
     rows = []
     for seed in range(N_SEEDS):
         splitter.random_state = seed
